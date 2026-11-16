@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clinic Desk | Appointments</title>
+<style>
+:root{font:16px system-ui,sans-serif;color:#152e2c;background:#eef4f1;--ink:#173d37;--line:#dce8e2}
+*{box-sizing:border-box}body{margin:0}header{background:#123b34;color:white;padding:25px max(5vw,18px);display:flex;justify-content:space-between;align-items:center;gap:16px}header strong{letter-spacing:.08em}header span{color:#c4e1d4;font-size:.85rem}main{max-width:1320px;margin:auto;padding:42px max(4vw,18px)}h1{font-size:clamp(2rem,5vw,3.2rem);margin:0;letter-spacing:-.05em}h2{margin:0 0 18px;font-size:1.2rem}p{color:#46645b}.layout{display:grid;grid-template-columns:320px minmax(0,1fr);gap:22px;margin-top:28px}.card{background:white;border:1px solid var(--line);border-radius:18px;padding:22px;align-self:start}label{display:block;font-size:.87rem;font-weight:650;margin:12px 0}input,select,button{font:inherit;border-radius:8px}input,select{width:100%;padding:8px;border:1px solid #aec6ba;background:white;color:inherit;margin-top:5px}button{padding:8px 12px;border:1px solid #adc6bb;background:#fff;color:var(--ink);cursor:pointer}button.primary{background:#14604e;color:white;border-color:#14604e}button:disabled{opacity:.6;cursor:wait}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #308877;outline-offset:2px}.actions{display:flex;gap:8px;flex-wrap:wrap}.toolbar{display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}.toolbar label{margin:0}.scroll{overflow-x:auto}table{width:100%;border-collapse:collapse;text-align:left;font-size:.88rem}th,td{padding:12px 8px;border-bottom:1px solid var(--line);vertical-align:middle}th{color:#46645b;white-space:nowrap}td span{display:block;color:#506861;margin-top:3px}.pill{display:inline-block;background:#e5f4ea;padding:4px 8px;border-radius:20px;font-weight:650}.cancelled{background:#f1e8e5;color:#713b35}#message{min-height:1.5em;margin-bottom:0}.error{color:#a02f28}#empty{padding:18px 0;margin:0}[hidden]{display:none!important}@media(max-width:850px){.layout{grid-template-columns:1fr}main{padding-top:25px}}
+</style>
+</head>
+<body>
+<header><strong>CLINIC DESK</strong><span>Appointment management · Demo</span></header>
+<main>
+<h1>Appointments</h1>
+<p>Book visits, adjust the schedule, and review cancellations.</p>
+<div class="layout">
+<section class="card" aria-labelledby="form-title">
+<h2 id="form-title">Book a visit</h2>
+<form id="booking">
+<label>Patient name<input name="patient" required maxlength="100" placeholder="Enter a fictional name"></label>
+<label>Provider<select name="provider" required></select></label>
+<label>Visit type<select name="service" required></select></label>
+<label>Date<input name="day" type="date" required></label>
+<label>Time<select name="slot" required></select></label>
+<div class="actions"><button class="primary" type="submit" id="save" disabled>Book appointment</button><button type="button" id="stop" hidden>Discard changes</button></div>
+</form>
+<p id="message" role="status" aria-live="polite"></p>
+</section>
+<section class="card" aria-labelledby="schedule-title">
+<div class="toolbar"><h2 id="schedule-title">Schedule</h2>
+<label>Status<select id="filter"><option value="">All appointments</option><option>Scheduled</option><option>Cancelled</option></select></label></div>
+<p id="summary" role="status"></p>
+<p id="empty">Loading schedule…</p>
+<div class="scroll"><table id="table" hidden><thead><tr><th scope="col">Patient</th><th scope="col">Provider</th><th scope="col">Date / Time</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead><tbody></tbody></table></div>
+</section>
+</div>
+</main>
+<script>
+const form = document.querySelector("#booking");
+const field = name => form.elements.namedItem(name);
+const filter = document.querySelector("#filter");
+const message = document.querySelector("#message");
+const save = document.querySelector("#save");
+const stop = document.querySelector("#stop");
+const empty = document.querySelector("#empty");
+const table = document.querySelector("#table");
+const title = document.querySelector("#form-title");
+let records = [];
+let editing = null;
+let options;
+let busy = false;
+
+async function api(path, method = "GET", data) {
+    const config = {method};
+    if (data) {
+        config.headers = {"Content-Type": "application/json"};
+        config.body = JSON.stringify(data);
+    }
+    const response = await fetch(path, config);
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Request failed.");
+    return result;
+}
+
+function status(text, error = false) {
+    message.textContent = text;
+    message.classList.toggle("error", error);
+}
+
+function reset() {
+    editing = null;
+    form.reset();
+    field("day").value = options.today;
+    title.textContent = "Book a visit";
+    save.textContent = "Book appointment";
+    stop.hidden = true;
+}
+
+function edit(record) {
+    if (busy) return;
+    editing = record.id;
+    for (const name of ["patient", "provider", "service", "day", "slot"]) {
+        field(name).value = record[name];
+    }
+    title.textContent = "Edit appointment";
+    save.textContent = "Save changes";
+    stop.hidden = false;
+    status("");
+    field("patient").focus();
+}
+
+async function cancel(record) {
+    if (busy || !confirm("Cancel the appointment for " + record.patient + "?")) return;
+    busy = true;
+    save.disabled = true;
+    try {
+        await api("/api/appointments/" + record.id, "DELETE");
+        if (editing === record.id) reset();
+        status("Appointment cancelled.");
+        await refresh();
+    } catch (error) {
+        status(error.message, true);
+    } finally {
+        busy = false;
+        save.disabled = false;
+    }
+}
+
+function render() {
+    const visible = records.filter(record => !filter.value || record.status === filter.value);
+    const body = table.tBodies[0];
+    body.replaceChildren();
+    table.hidden = !visible.length;
+    empty.hidden = Boolean(visible.length);
+    empty.textContent = records.length ? "No appointments match this filter." : "No appointments yet. Book a visit to get started.";
+    document.querySelector("#summary").textContent =
+        records.filter(record => record.status === "Scheduled").length + " scheduled · " +
+        records.filter(record => record.status === "Cancelled").length + " cancelled";
+    for (const record of visible) {
+        const row = body.insertRow();
+        const patient = row.insertCell();
+        patient.textContent = record.patient;
+        const service = document.createElement("span");
+        service.textContent = record.service;
+        patient.append(service);
+        row.insertCell().textContent = record.provider;
+        row.insertCell().textContent = record.day + " · " + record.slot;
+        const badge = document.createElement("strong");
+        badge.className = "pill" + (record.status === "Cancelled" ? " cancelled" : "");
+        badge.textContent = record.status;
+        row.insertCell().append(badge);
+        const actions = row.insertCell();
+        if (record.status === "Scheduled") {
+            const group = document.createElement("div");
+            group.className = "actions";
+            for (const [label, handler] of [["Edit", edit], ["Cancel", cancel]]) {
+                const button = document.createElement("button");
+                button.textContent = label;
+                button.setAttribute("aria-label", label + " appointment for " + record.patient);
+                button.addEventListener("click", () => handler(record));
+                group.append(button);
+            }
+            actions.append(group);
+        } else {
+            actions.textContent = "—";
+        }
+    }
+}
+
+async function refresh() {
+    records = await api("/api/appointments");
+    render();
+}
+
+form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true;
+    save.disabled = true;
+    const id = editing;
+    try {
+        await api("/api/appointments" + (id ? "/" + id : ""), id ? "PUT" : "POST",
+                  Object.fromEntries(new FormData(form)));
+        reset();
+        status(id ? "Appointment updated." : "Appointment booked.");
+        if (filter.value === "Cancelled") filter.value = "Scheduled";
+        await refresh();
+    } catch (error) {
+        status(error.message, true);
+    } finally {
+        busy = false;
+        save.disabled = false;
+    }
+});
+
+filter.addEventListener("change", render);
+stop.addEventListener("click", () => { if (!busy) { reset(); status(""); } });
+
+async function start() {
+    try {
+        options = await api("/api/options");
+        for (const [name, values] of Object.entries({
+            provider: options.providers, service: options.services, slot: options.slots
+        })) {
+            for (const value of values) field(name).add(new Option(value, value));
+        }
+        field("day").min = options.today;
+        reset();
+        await refresh();
+        save.disabled = false;
+    } catch (error) {
+        empty.textContent = "Unable to load the schedule. Refresh to retry.";
+        status(error.message, true);
+    }
+}
+start();
+</script>
+</body>
+</html>
